@@ -14,9 +14,9 @@ defmodule Tringin.SeriesSupervisor do
   def init(opts) do
     runtime_opts = Keyword.fetch!(opts, :runtime_opts)
 
-    series_runner_opts =
+    runner_opts =
       opts
-      |> Keyword.get(:series_runner_opts, [])
+      |> Keyword.get(:runner_opts, [])
       |> Keyword.put(:runtime_opts, runtime_opts)
 
     input_agent_opts =
@@ -25,8 +25,9 @@ defmodule Tringin.SeriesSupervisor do
       |> Keyword.put(:runtime_opts, runtime_opts)
 
     children = [
-      {Tringin.SeriesRunner, series_runner_opts},
-      {Tringin.AnswersAgent, input_agent_opts}
+      {Tringin.SeriesRunner, runner_opts},
+      {Tringin.InputAgent.SingleEntry, input_agent_opts},
+      {Tringin.StateBroadcaster, runtime_opts: runtime_opts}
     ]
 
     case Tringin.Runtime.register_series_process(runtime_opts, :series_supervisor) do

@@ -1,4 +1,4 @@
-defmodule Tringin.AnswersAgent do
+defmodule Tringin.InputAgent.SingleEntry do
   @moduledoc false
 
   use GenServer
@@ -13,23 +13,24 @@ defmodule Tringin.AnswersAgent do
     runtime_opts = Keyword.fetch!(opts, :runtime_opts)
 
     init_state = %{
+      state_tag: nil,
       answers: %{},
       runner_state: nil,
       runtime_opts: runtime_opts
     }
 
-    with {:ok, _} <- Runtime.register_series_process(runtime_opts, :input_agent),
+    with {:ok, _} <- Runtime.register_series_process(runtime_opts, {:service, :input_agent}),
          {:ok, runner} <- Runtime.find_series_process(runtime_opts, :series_runner),
-         {:ok, %{state: runner_state}} <- Tringin.SeriesRunner.subscribe(runner) do
-      {:ok, %{init_state | runner_state: runner_state}}
+         {:ok, {%{state: runner_state}, state_tag}} <- Tringin.SeriesRunner.get_state(runner) do
+      {:ok, %{init_state | runner_state: runner_state, state_tag: state_tag}}
     else
       error ->
         {:stop, error, init_state}
     end
   end
 
-  def submit_answer(agent, responder_id, answer) do
-    GenServer.call(agent, {:submit_answer, responder_id, answer})
+  def handle_input(agent, {actor_id, input}) do
+    GenServer.call(agent, {:submit_answer, actor_id, input})
   end
 
   def handle_call({:submit_answer, responder_id, answer}, {pid, _tag}, state) do
@@ -45,30 +46,28 @@ defmodule Tringin.AnswersAgent do
     end
   end
 
-  def handle_info({:series_runner_update, %{state: :running}, _}, state) do
-    {:noreply, %{state | runner_state: :running, answers: %{}}}
+  def handle_info({:runner_update, {%{state: :running}, state_tag}, _}, state) do
+    {:noreply, %{state | runner_state: :running, answers: %{}, state_tag: state_tag}}
   end
 
-  def handle_info({:series_runner_update, %{state: :resting}, _}, state) do
-    # for {{submitter_pid, responder_id}, answer} <- state.answers do
-    #   Process.send(
-    #     submitter_pid,
-    #     {:submitted_answer, {responder_id, answer}, {self(), make_ref()}},
-    #     [:nosuspend]
-    #   )
-    # end
+  def handle_info({:runner_update, {%{state: :resting}, state_tag}, _}, state) do
+    message = {
+      :input_agent_update,
+      {:submitted_answers, state.answers, state.state_tag},
+      {self(), make_ref()}
+    }
 
-    :ok =
-      Tringin.Runtime.broadcast_message(
-        state.runtime_opts,
-        {:input_agent_update, {:submitted_answers, state.answers}}
-      )
+    Tringin.Runtime.broadcast(
+      state.runtime_opts,
+      [:listener],
+      message
+    )
 
-    {:noreply, %{state | runner_state: :resting, answers: %{}}}
+    {:noreply, %{state | runner_state: :resting, answers: %{}, state_tag: state_tag}}
   end
 
-  def handle_info({:series_runner_update, %{state: runner_state}, _}, state) do
-    {:noreply, %{state | runner_state: runner_state}}
+  def handle_info({:runner_update, {%{state: runner_state}, state_tag}, _}, state) do
+    {:noreply, %{state | runner_state: runner_state, state_tag: state_tag}}
   end
 
   @type state :: Map.t()

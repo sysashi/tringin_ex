@@ -5,7 +5,7 @@ defmodule Tringin.SeriesRunner do
 
   @type state :: :ready | :running | :resting | :paused
 
-  @type duration :: {:seconds, pos_integer()}
+  @type duration :: non_neg_integer()
 
   @type t :: %__MODULE__{
           series: Tringin.Series.t(),
@@ -24,8 +24,8 @@ defmodule Tringin.SeriesRunner do
             question_duration: 20_000,
             total_processed: 0,
             private: %{
-              listeners: MapSet.new(),
-              timers: %{},
+              timer: :unset,
+              state_tag: {0, 0, 0},
               runtime_opts: %{}
             }
 
@@ -39,8 +39,12 @@ defmodule Tringin.SeriesRunner do
 
     case Tringin.Runtime.register_series_process(runtime_opts, :series_runner) do
       {:ok, _} ->
-        runner = struct(__MODULE__, Keyword.delete(opts, :private))
-        runner = manage_private(runner, &Map.put(&1, :runtime_opts, runtime_opts))
+        runner =
+          __MODULE__
+          |> struct(Keyword.delete(opts, :private))
+          |> put_private(:runtime_opts, runtime_opts)
+          |> put_private(:state_tag, gen_state_tag())
+
         {:ok, runner}
 
       {:error, reason} ->
@@ -48,123 +52,145 @@ defmodule Tringin.SeriesRunner do
     end
   end
 
+  def get_state(runner) do
+    GenServer.call(runner, :get_state)
+  end
+
   def start_series(runner, config \\ []) do
     GenServer.call(runner, {:start_series, config})
   end
 
-  def subscribe(runner) do
-    GenServer.call(runner, :subscribe)
-  end
-
-  def unsubscribe(runner) do
-    GenServer.call(runner, :unsubscribe)
-  end
-
-  def handle_call(:subscribe, {pid, _tag}, runner) do
-    state_update = build_state_update(runner)
-
-    runner =
-      manage_private(runner, fn private ->
-        %{private | listeners: MapSet.put(private.listeners, pid)}
-      end)
-
-    {:reply, {:ok, state_update}, runner}
-  end
-
-  def handle_call(:unsubscribe, {pid, _tag}, runner) do
-    runner =
-      manage_private(runner, fn private ->
-        %{private | listeners: MapSet.delete(private.listeners, pid)}
-      end)
-
-    {:reply, :ok, runner}
+  def handle_call(:get_state, _from, runner) do
+    {:reply, {:ok, build_state_snapshot(runner)}, runner}
   end
 
   def handle_call({:start_series, _config}, _from, runner) do
-    state_update = build_state_update(runner)
-
-    :ok = broadcast_state_update(runner, state_update)
-
-    {:reply, {:ok, state_update}, set_timer(runner, :next_question)}
+    {:reply, {:ok, build_state_snapshot(runner)}, transition_to(runner, :running)}
   end
 
-  def handle_info(:next_question, runner) do
-    case run_next_question(runner) do
-      {:ok, _question, runner} ->
-        :ok = broadcast_state_update(runner, build_state_update(runner))
-        {:noreply, set_timer(runner, :rest)}
+  def handle_info({:set, :running}, runner) do
+    case move_series(runner) do
+      {:ok, runner} ->
+        {:noreply, transition_to(runner, :resting)}
 
       {:error, reason} ->
         IO.warn("Runner: next question error: #{inspect(reason)}")
+
         {:noreply, runner}
     end
   end
 
-  def handle_info(:rest, %{state: :running} = runner) do
-    runner = %{runner | state: :resting}
+  def handle_info({:set, :resting}, runner) do
+    case rest(runner) do
+      {:ok, runner} ->
+        {:noreply, transition_to(runner, :running)}
 
-    :ok = broadcast_state_update(runner, build_state_update(runner))
+      {:error, reason} ->
+        IO.warn("Runner:rest error: #{inspect(reason)}")
 
-    {:noreply, set_timer(runner, :next_question)}
+        {:noreply, runner}
+    end
   end
 
   # Api
   alias __MODULE__
 
-  @spec run_next_question(runner :: t()) ::
-          {:ok, question :: any(), t()} | {:error, state} | {:error, any}
-  def run_next_question(%SeriesRunner{state: state} = runner) when state in [:resting, :ready] do
-    with {:ok, question, series} <- Tringin.Series.next_question(runner.series) do
-      {:ok, question,
+  @spec move_series(t()) :: {:ok, t()} | {:error, state} | {:error, any}
+  def move_series(%SeriesRunner{state: state} = runner) when state in [:resting, :ready] do
+    with {:ok, series} <- Tringin.Series.next_question(runner.series) do
+      {:ok,
        %{runner | state: :running, series: series, total_processed: runner.total_processed + 1}}
     end
   end
 
-  def run_next_question(%SeriesRunner{state: state}), do: {:error, state}
+  def move_series(%SeriesRunner{state: state}), do: {:error, state}
+
+  def rest(%SeriesRunner{state: :running} = runner) do
+    {:ok, %{runner | state: :resting}}
+  end
+
+  def rest(%SeriesRunner{state: state}), do: {:error, state}
 
   # Utils
 
-  def broadcast_state_update(
-        %{private: %{runtime_opts: runtime_opts, listeners: listeners}},
-        state_update
-      ) do
-    message = {:series_runner_update, state_update, {self(), make_ref()}}
+  def transition_to(runner, new_state) do
+    new_state_tag = gen_state_tag()
 
-    for pid <- listeners do
-      Process.send(pid, message, [:nosuspend])
+    if runner.private.state_tag >= new_state_tag do
+      raise "Previous state tag is greater or eq!:" <>
+              " #{inspect(runner.private.state_tag)} >= #{inspect(new_state_tag)}"
     end
 
-    Tringin.Runtime.broadcast_message(
-      runtime_opts,
-      message
+    duration = state_to_duration(runner)
+
+    runner
+    |> put_private(:state_tag, new_state_tag)
+    |> broadcast_state_transition()
+    |> set_timer(duration, {:set, new_state})
+  end
+
+  def broadcast_state_transition(%SeriesRunner{} = runner) do
+    transition_message = {
+      :runner_update,
+      build_state_snapshot(runner),
+      {self(), make_ref()}
+    }
+
+    Tringin.Runtime.broadcast(
+      runner.private.runtime_opts,
+      [:service, :listener],
+      transition_message
+    )
+
+    runner
+  end
+
+  def build_state_snapshot(runner) do
+    data =
+      runner
+      |> Map.from_struct()
+      |> Map.put(:expected_duration, state_to_duration(runner))
+      |> Map.delete(:private)
+
+    {data, runner.private.state_tag}
+  end
+
+  defp set_timer(%{private: %{timer: :unset}} = runner, duration, message) do
+    put_private(
+      runner,
+      :timer,
+      Process.send_after(self(), message, duration)
     )
   end
 
-  def build_state_update(runner) do
-    runner
-    |> Map.from_struct()
-    |> Map.put(:expected_duration, state_to_duration(runner))
-    |> Map.put(:monotonic_ts, :erlang.monotonic_time())
-    |> Map.delete(:private)
-  end
-
-  defp set_timer(%{private: %{timers: timers} = private} = runner, message) do
-    timers =
-      Map.put(
-        timers,
-        message,
-        Process.send_after(self(), message, state_to_duration(runner))
+  defp set_timer(%{private: %{timer: timer}} = runner, msg, dur) when is_reference(timer) do
+    if left = Process.read_timer(timer) do
+      IO.warn(
+        "Overwriting current timer (left: #{left}, state: #{runner.state})" <>
+          " with message: #{inspect(msg)} (duration: #{dur})."
       )
 
-    %{runner | private: %{private | timers: timers}}
+      Process.cancel_timer(timer)
+    end
+
+    runner
+    |> put_private(:timer, :unset)
+    |> set_timer(msg, dur)
   end
 
-  defp manage_private(%{private: private} = runner, fun) do
-    %{runner | private: fun.(private)}
+  defp put_private(%{private: private} = runner, key, value) do
+    %{runner | private: Map.put(private, key, value)}
   end
 
   defp state_to_duration(%{state: :ready, start_delay: dur}), do: dur
   defp state_to_duration(%{state: :paused, start_delay: dur}), do: dur
   defp state_to_duration(%{state: :resting, rest_duration: dur}), do: dur
   defp state_to_duration(%{state: :running, question_duration: dur}), do: dur
+
+  def gen_state_tag(),
+    do: {
+      :erlang.monotonic_time(),
+      :erlang.unique_integer([:monotonic]),
+      :erlang.time_offset()
+    }
 end

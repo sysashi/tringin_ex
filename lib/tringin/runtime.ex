@@ -42,13 +42,11 @@ defmodule Tringin.Runtime do
     |> Map.new()
   end
 
-  def broadcast_message(runtime_opts, message) do
-    with %{registry: registry, registry_prefix: prefix} <- runtime_opts do
-      Registry.dispatch(registry, prefix, fn entries ->
-        for {pid, {:listener, _}} <- entries do
-          Process.send(pid, message, [:nosuspend])
-        end
-      end)
-    end
+  def broadcast(runtime_opts, to, message) when is_list(to) do
+    Registry.dispatch(runtime_opts.registry, runtime_opts.registry_prefix, fn entries ->
+      for {pid, {role, _}} <- entries, role in to do
+        Process.send(pid, message, [:nosuspend])
+      end
+    end)
   end
 end

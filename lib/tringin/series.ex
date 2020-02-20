@@ -1,36 +1,24 @@
 defmodule Tringin.Series do
   @moduledoc false
 
-  alias Tringin.{Series, Source}
+  alias Tringin.Series
 
   @type t :: %__MODULE__{
-          source: Source.t(),
+          source: atom(),
+          source_context: Map.t(),
           position: pos_integer(),
           current_question: any()
         }
 
-  defstruct [:source, :position, :current_question]
+  defstruct source: nil,
+            source_context: %{},
+            position: 1,
+            current_question: nil
 
-  @spec init_series(source :: Source.t(), params :: keyword()) :: {:ok, t()} | {:error, any()}
-  def init_series(source, params \\ []) do
-    params =
-      params
-      |> Map.new()
-      |> Map.put_new(:position, 1)
-
-    with {:ok, question} <- Source.next_question(source, offset: params.position) do
-      params =
-        params
-        |> Map.put(:source, source)
-        |> Map.put(:current_question, question)
-
-      {:ok, struct(__MODULE__, params)}
-    end
-  end
-
-  def next_question(%Series{source: source, position: pos} = series) do
-    with {:ok, question} <- Source.next_question(source, offset: pos) do
-      {:ok, question, %{series | current_question: question, position: pos + 1}}
+  @spec next_question(t(), extra_params :: Map.t()) :: {:ok, t()} | {:error, any()}
+  def next_question(%Series{source: source, source_context: ctx} = series, extra \\ %{}) do
+    with {:ok, question} <- source.next_question(ctx, Map.put(extra, :position, series.position)) do
+      {:ok, %{series | current_question: question, position: series.position + 1}}
     end
   end
 end
