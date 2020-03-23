@@ -64,6 +64,7 @@ defmodule Tringin.SeriesRunner do
     {:reply, {:ok, build_state_snapshot(runner)}, runner}
   end
 
+  # TODO: don't attempt to start running series
   def handle_call({:start_series, _config}, _from, runner) do
     {:reply, {:ok, build_state_snapshot(runner)}, transition_to(runner, :running)}
   end
@@ -163,10 +164,10 @@ defmodule Tringin.SeriesRunner do
     )
   end
 
-  defp set_timer(%{private: %{timer: timer}} = runner, msg, dur) when is_reference(timer) do
+  defp set_timer(%{private: %{timer: timer}} = runner, dur, msg) when is_reference(timer) do
     if left = Process.read_timer(timer) do
       IO.warn(
-        "Overwriting current timer (left: #{left}, state: #{runner.state})" <>
+        "Overwriting current timer (left: #{left}, state: #{inspect(runner.state)})" <>
           " with message: #{inspect(msg)} (duration: #{dur})."
       )
 
@@ -175,7 +176,7 @@ defmodule Tringin.SeriesRunner do
 
     runner
     |> put_private(:timer, :unset)
-    |> set_timer(msg, dur)
+    |> set_timer(dur, msg)
   end
 
   defp put_private(%{private: private} = runner, key, value) do

@@ -7,28 +7,29 @@ defmodule Tringin.SeriesSupervisor do
     Supervisor.start_link(__MODULE__, opts)
   end
 
-  # @required_runtime_opts [:registry, :registry_prefix]
+  @core [
+    {:runner, Tringin.SeriesRunner, []}
+  ]
+
+  @services [
+    {:input_agent, Tringin.InputAgent.SingleEntry, []},
+    {:progress_broadcaster, Tringin.ProgressBroadcaster, rate: 1000}
+  ]
 
   # make sure series is provided
   @impl true
-  def init(opts) do
-    runtime_opts = Keyword.fetch!(opts, :runtime_opts)
+  def init(config) do
+    runtime_opts = Keyword.fetch!(config, :runtime_opts)
 
-    runner_opts =
-      opts
-      |> Keyword.get(:runner_opts, [])
-      |> Keyword.put(:runtime_opts, runtime_opts)
+    children =
+      for {name, mod, default_opts} <- @core ++ @services do
+        opts =
+          default_opts
+          |> Keyword.merge(config[name] || [])
+          |> Keyword.put_new(:runtime_opts, runtime_opts)
 
-    input_agent_opts =
-      opts
-      |> Keyword.get(:input_agent_opts, [])
-      |> Keyword.put(:runtime_opts, runtime_opts)
-
-    children = [
-      {Tringin.SeriesRunner, runner_opts},
-      {Tringin.InputAgent.SingleEntry, input_agent_opts},
-      {Tringin.StateBroadcaster, runtime_opts: runtime_opts}
-    ]
+        {mod, opts}
+      end
 
     case Tringin.Runtime.register_series_process(runtime_opts, :series_supervisor) do
       {:ok, _} ->
