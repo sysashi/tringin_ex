@@ -8,7 +8,7 @@ defmodule Tringin.SeriesSupervisor do
   end
 
   @core [
-    {:runner, Tringin.SeriesRunner, []}
+    {:runner, Tringin.SeriesRunnerExpirement, []}
   ]
 
   @services [
