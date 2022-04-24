@@ -1,8 +1,68 @@
 defmodule Tringin.SeriesRunnerExpirement do
-  @moduledoc false
+  @moduledoc """
+  ## States
+
+    * `:waiting`
+    * `:running`
+    * `:resting`
+    * `:paused`
+
+  ## Events
+
+  `:start` start series if its not started
+  `:stop` restarts the series if its possible
+
+  `:pause` pauses at the next rest duration
+  `:force_pause` pauses running state at current duration
+
+  `:continue` runs series again if previous state was paused
+  `:restart_last` restarts last question if state was in :running or :force_paused
+
+  ## Delays and Durations
+
+    * `:start_delay` delay before `:waiting` is changed to `:running`
+    * `:run_duration` duration of `:running` state
+    * `:rest_duration` delay before `:resting` is changed to `:running`
+    * `:post_pause_delay` delay before `:paused` transitioned to `:running`
+
+  ## Automatic Mode
+
+  Requires states timeouts to be set
+
+  ## Manual Mode
+
+  State Transitions will not happen automatically based on duration and delays. Runner will
+  accept additional set of events in order to progerss through series.
+
+    * `:move` moves series to next question (relative to current position)
+    * `{:move, n}` moves series to Nth question (relative to current position)
+    * `{:set, n}` moves series to Nth question
+
+  First approach would be to use generic timeouts and keep track of them,
+  so we would know how much left for the specific state to run and can
+  continue from that state for remaining timer
+
+  Second approach would be to skip need for keeping track of timeouts and
+  restart previous :waiting state
+  """
+
+  @behaviour :gen_statem
+
+  require Logger
+
+  alias Tringin.SeriesRunner.Events.{
+    ConfigChanged,
+    Initialized,
+    StateTransition
+  }
+
+  alias Tringin.SeriesRegistry
 
   def child_spec(init_arg) do
-    %{id: __MODULE__, start: {__MODULE__, :start_link, [init_arg]}}
+    %{
+      id: __MODULE__,
+      start: {__MODULE__, :start_link, [init_arg]}
+    }
   end
 
   defstruct series: nil,
@@ -12,50 +72,32 @@ defmodule Tringin.SeriesRunnerExpirement do
             rest_duration: 5000,
             post_pause_delay: 3000,
             state: nil,
+            series_registry: nil,
             private: %{
               state_tag: {0, 0, 0},
-              runtime_opts: %{}
             }
 
-  @behaviour :gen_statem
-  # states = [:waiting, :running, :resting, :paused]
-  #
-  # events = [:start, :stop, :pause, :continue]
-  # :stop restarts the series
-  #
-  # options:
-  #   * run_mode -
-  #     * manual - states are not changed based on timeouts, requires explicitly to
-  #       send "move" event, :running state still can have a timeout.
-  #     * automatic - requires states timouts to be set.
-  #   * start_delay - delay before :waiting is changed to :running
-  #   * run_duration
-  #   * rest_duration (ignored when run_type is manual)
-  #   * post_pause_delay - delay before :paused transitioned to :running
+  def start_series(runner_pid, config \\ []) do
+    :gen_statem.call(runner_pid, {:start_series, config})
+  end
 
-  # Pause
-  # When state is :running or :resting :pause event can be handled.
-  #
-  # First approach would be to use generic timeouts and keep track of them,
-  # so we would know how much left for the specific state to run and can
-  # continue from that state for remaining timer
-  #
-  # Second approach would be to skip need for keeping track of timeouts and
-  # restart previous :waiting state
+  def get_state(runner_pid) do
+    :gen_statem.call(runner_pid, :get_state)
+  end
 
+  @doc false
   def start_link(opts) do
     :gen_statem.start_link(__MODULE__, opts, [])
   end
 
   @impl true
   def init(opts) do
-    runtime_opts = Keyword.fetch!(opts, :runtime_opts)
+    registry = Keyword.fetch!(opts, :series_registry)
 
-    case Runtime.register_series_process(runtime_opts, :series_runner) do
+    case SeriesRegistry.register_series_process(registry, :series_runner) do
       {:ok, _} ->
         runner =
           struct(__MODULE__, Keyword.delete(opts, :private))
-          |> put_private(:runtime_opts, runtime_opts)
           |> put_private(:state_tag, gen_state_tag())
 
         {:ok, :waiting, runner}
@@ -63,18 +105,6 @@ defmodule Tringin.SeriesRunnerExpirement do
       {:error, reason} ->
         {:stop, reason}
     end
-  end
-
-  # def init(opts) do
-  #   runner =
-  #     struct(__MODULE__, Keyword.delete(opts, :private))
-
-  #   {:ok, :waiting, runner}
-  # end
-  #
-
-  def start_series(runner_pid, config \\ []) do
-    :gen_statem.call(runner_pid, {:start_series, config})
   end
 
   @impl true
@@ -89,24 +119,23 @@ defmodule Tringin.SeriesRunnerExpirement do
     {:keep_state_and_data, {:reply, from, {:ok, build_state_snapshot(runner)}}}
   end
 
-  def handle_event(:enter, _old_state, new_state, runner) do
-    IO.puts("Transition to: #{new_state}")
+  def handle_event(:enter, old_state, new_state, runner) do
+    Logger.debug(
+      "Tringin.SeriesRunner transition from: #{inspect(old_state)} to: #{inspect(new_state)}"
+    )
+
     new_state_tag = gen_state_tag()
+    old_state_tag = runner.private.state_tag
 
-    # if runner.private.state_tag >= new_state_tag do
-    #   raise "Previous state tag is greater or eq!:" <>
-    #           " #{inspect(runner.private.state_tag)} >= #{inspect(new_state_tag)}"
-    # end
+    runner =
+      runner
+      |> Map.put(:state, new_state)
+      |> put_private(:state_tag, new_state_tag)
 
-    runner = put_private(runner, :state_tag, new_state_tag)
-    runner = %{runner | state: new_state}
-
-    broadcast_state_transition(runner)
-
-    {:keep_state, runner}
+    {:keep_state, broadcast_state_transition(runner, old_state, old_state_tag, new_state)}
   end
 
-  def handle_event(:cast, {:move, n}, :running, runner) do
+  def handle_event(:cast, {:move, _n}, :running, _runner) do
     :keep_state_and_data
   end
 
@@ -122,22 +151,20 @@ defmodule Tringin.SeriesRunnerExpirement do
     :keep_state_and_data
   end
 
-  def handle_event(:cast, :continue, :paused, runner) do
+  def handle_event(:cast, :continue, :paused, _runner) do
     :keep_state_and_data
   end
 
   # Starting series
 
-  def handle_event(:cast, :start_series, :waiting, runner) do
-    IO.puts("Starting series...")
-    {:next_state, :start_delay, runner, {:state_timeout, runner.start_delay, :run}}
-  end
-
   def handle_event({:call, from}, {:start_series, _}, :waiting, runner) do
-    runner_snapshot = build_state_snapshot(runner)
-
-    {:next_state, :start_delay, runner,
-     [{:state_timeout, runner.start_delay, :run}, {:reply, from, {:ok, runner_snapshot}}]}
+    {
+      :keep_state_and_data,
+      [
+        {:state_timeout, runner.start_delay, :run},
+        {:reply, from, {:ok, build_state_snapshot(runner)}}
+      ]
+    }
   end
 
   ## Ignore start_series calls if state is not "waiting"
@@ -148,7 +175,8 @@ defmodule Tringin.SeriesRunnerExpirement do
 
   # Run series
 
-  def handle_event(:state_timeout, :run, state, runner) when state in [:start_delay, :resting] do
+  def handle_event(:state_timeout, :run, state, runner)
+      when state in [:waiting, :start_delay, :resting] do
     with {:ok, series} <- Tringin.Series.next_question(runner.series) do
       runner = %{runner | state: :running, series: series}
 
@@ -175,21 +203,23 @@ defmodule Tringin.SeriesRunnerExpirement do
       :erlang.time_offset()
     }
 
-  def broadcast_state_transition(runner) do
-    transition_message =
-      {
-        :runner_update,
-        build_state_snapshot(runner),
-        {self(), make_ref()}
-      }
+  def broadcast_state_transition(runner, old_state, old_state_tag, new_state) do
+    event = %StateTransition{
+      id: {self(), make_ref()},
+      previous_state: old_state,
+      previous_state_tag: old_state_tag,
+      new_state: new_state,
+      new_state_tag: runner.private.state_tag,
+      expected_state_duration: state_to_duration(runner)
+    }
 
-    Tringin.Runtime.broadcast(
-      runner.private.runtime_opts,
+    SeriesRegistry.broadcast(
+      runner.series_registry,
       [:service, :listener],
-      transition_message
+      event
     )
 
-    :ok
+    runner
   end
 
   def build_state_snapshot(runner) do
@@ -212,7 +242,7 @@ defmodule Tringin.SeriesRunnerExpirement do
   defp state_to_duration(%{state: :paused, post_pause_delay: dur}), do: dur
 
   defp state_to_duration(%{state: state}) do
-    IO.warn("Unknown state: #{state}")
+    Logger.warn("Tringin.SeriesRunner unknown duration for #{inspect(state)} state")
     nil
   end
 end

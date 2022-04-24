@@ -3,27 +3,27 @@ defmodule Tringin do
   Kinda useful helpers?
   """
 
-  import Tringin.Runtime
+  alias Tringin.SeriesRegistry
 
-  def register_series_listener(runtime_opts, listener_id) do
-    register_series_process(runtime_opts, {:listener, listener_id})
+  def register_series_listener(series_registry, listener_id) do
+    SeriesRegistry.register_series_process(series_registry, {:listener, listener_id})
   end
 
-  def unregister_series_listener(runtime_opts, listener_id) do
-    unregister_series_process(runtime_opts, {:listener, listener_id})
+  def unregister_series_listener(series_registry, listener_id) do
+    SeriesRegistry.unregister_series_process(series_registry, {:listener, listener_id})
   end
 
-  def list_series_processes(runtime_opts) do
-    list_series_processes(runtime_opts.registry, runtime_opts.registry_prefix)
+  def list_series_processes(series_registry) do
+    SeriesRegistry.list_series_processes(series_registry)
   end
 
-  def find_service_process(runtime_opts, role) do
-    find_series_process(runtime_opts, {:service, role})
+  def find_service_process(series_registry, role) do
+    SeriesRegistry.find_series_process(series_registry, {:service, role})
   end
 
-  def start_series(runtime_opts) do
-    with {:ok, runner} <- find_series_process(runtime_opts, :series_runner) do
-      Tringin.SeriesRunner.start_series(runner)
+  def start_series(series_registry) do
+    with {:ok, runner} <- SeriesRegistry.find_series_process(series_registry, :series_runner) do
+      Tringin.SeriesRunnerExpirement.start_series(runner)
     end
   end
 end

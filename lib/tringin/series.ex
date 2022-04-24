@@ -21,4 +21,26 @@ defmodule Tringin.Series do
       {:ok, %{series | current_question: question, position: series.position + 1}}
     end
   end
+
+  ###
+
+  alias Tringin.Runtime
+
+  def start_supervised(registry, name, config) do
+    unless config[:runner][:series] do
+      raise ArgumentError,
+            "runner requires series to be set, found none in config #{inspect(config[:runner])}"
+    end
+
+    registered_processes = Runtime.list_series_processes(registry, name)
+
+    unless Enum.empty?(registered_processes) do
+      msg =
+        registered_processes
+        |> Enum.map(fn {role, pid} -> "#{inspect role}: #{inspect pid}" end)
+        |> Enum.join("\n")
+
+      raise "series is already in registry, found following processes\n#{msg}"
+    end
+  end
 end
