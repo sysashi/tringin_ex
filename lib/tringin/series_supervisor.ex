@@ -1,4 +1,4 @@
-defmodule Tringin.SeriesSupervisor do
+defmodule Tringin.RunnerSupervisor do
   @moduledoc false
 
   require Logger
@@ -10,32 +10,29 @@ defmodule Tringin.SeriesSupervisor do
   end
 
   @core [
-    {:runner, Tringin.SeriesRunnerExpirement, []}
+    {:runner, Tringin.Runner, []}
   ]
 
   @services [
     {:input_agent, Tringin.InputAgent.SingleEntry, []},
-    {:progress_broadcaster, Tringin.ProgressBroadcaster, rate: 1000}
+    {:progress_broadcaster, Tringin.ProgressBroadcaster, []}
   ]
 
-  # make sure series is provided
   @impl true
   def init(config) do
-    runtime_opts = Keyword.fetch!(config, :runtime_opts)
-    registry = Tringin.SeriesRegistry.new(runtime_opts.registry, runtime_opts.registry_prefix)
+    registry = Keyword.fetch!(config, :registry)
 
     children =
       for {name, mod, default_opts} <- @core ++ @services do
         opts =
           default_opts
           |> Keyword.merge(config[name] || [])
-          |> Keyword.put_new(:runtime_opts, runtime_opts)
-          |> Keyword.put_new(:series_registry, registry)
+          |> Keyword.put_new(:registry, registry)
 
         {mod, opts}
       end
 
-    case Tringin.SeriesRegistry.register_series_process(registry, :series_supervisor) do
+    case Tringin.RunnerRegistry.register_runner_process(registry, :runner_supervisor) do
       {:ok, _} ->
         Supervisor.init(children, strategy: :rest_for_one)
 

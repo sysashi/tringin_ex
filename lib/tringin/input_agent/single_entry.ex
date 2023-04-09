@@ -7,8 +7,8 @@ defmodule Tringin.InputAgent.SingleEntry do
 
   require Logger
 
-  alias Tringin.SeriesRegistry
-  alias Tringin.SeriesRunner.Events.StateTransition
+  alias Tringin.RunnerRegistry
+  alias Tringin.Runner.Events.StateTransition
   alias Tringin.InputAgent.Events.SubmittedInputs
 
   def start_link(opts) do
@@ -17,19 +17,20 @@ defmodule Tringin.InputAgent.SingleEntry do
 
   @impl true
   def init(opts) do
-    series_registry = Keyword.fetch!(opts, :series_registry)
+    registry = Keyword.fetch!(opts, :registry)
 
     init_state = %{
       state_tag: nil,
       inputs: %{},
       runner_state: nil,
-      series_registry: series_registry
+      registry: registry
     }
 
     with {:ok, _} <-
-           SeriesRegistry.register_series_process(series_registry, {:service, :input_agent}),
-         {:ok, runner} <- SeriesRegistry.find_series_process(series_registry, :series_runner),
-         {:ok, {%{state: runner_state}, state_tag}} <- Tringin.SeriesRunnerExpirement.get_state(runner) do
+           RunnerRegistry.register_runner_process(registry, {:service, :input_agent}),
+         {:ok, runner} <- RunnerRegistry.find_runner_process(registry, :runner),
+         {:ok, {%{state: runner_state}, state_tag}} <-
+           Tringin.Runner.get_state(runner) do
       {:ok, %{init_state | runner_state: runner_state, state_tag: state_tag}}
     else
       error ->
@@ -78,8 +79,8 @@ defmodule Tringin.InputAgent.SingleEntry do
       state_tag: state.state_tag
     }
 
-    SeriesRegistry.broadcast(
-      state.series_registry,
+    RunnerRegistry.broadcast(
+      state.registry,
       [:listener],
       inputs_event
     )

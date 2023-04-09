@@ -1,8 +1,8 @@
 defmodule Tringin.ProgressBroadcaster do
   use GenServer
 
-  alias Tringin.SeriesRegistry
-  alias Tringin.SeriesRunner.Events.StateTransition
+  alias Tringin.RunnerRegistry
+  alias Tringin.Runner.Events.StateTransition
   alias Tringin.ProgressBroadcaster.Events.ProgressUpdate
 
   def start_link(opts) do
@@ -10,20 +10,21 @@ defmodule Tringin.ProgressBroadcaster do
   end
 
   def init(opts) do
-    series_registry = Keyword.fetch!(opts, :series_registry)
+    {registry, opts} = Keyword.pop!(opts, :registry)
+    config = Tringin.ProgressBroadcaster.Config.new!(opts) |> Map.new()
 
     state = %{
-      rate: opts[:rate] || 250,
-      series_registry: series_registry,
+      rate: config.rate,
+      registry: registry,
       latest_state_tag: {0, 0, 0},
       duration: 0,
       timer: nil
     }
 
     with {:ok, _} <-
-           SeriesRegistry.register_series_process(series_registry, {:service, :progress_broadcaster}),
-         {:ok, runner} <- SeriesRegistry.find_series_process(series_registry, :series_runner),
-         {:ok, {runner, state_tag}} <- Tringin.SeriesRunnerExpirement.get_state(runner) do
+           RunnerRegistry.register_runner_process(registry, {:service, :progress_broadcaster}),
+         {:ok, runner} <- RunnerRegistry.find_runner_process(registry, :runner),
+         {:ok, {runner, state_tag}} <- Tringin.Runner.get_state(runner) do
       state =
         state
         |> Map.put(:duration, runner.expected_duration)
@@ -60,8 +61,8 @@ defmodule Tringin.ProgressBroadcaster do
       latest_state_tag: state.latest_state_tag
     }
 
-    SeriesRegistry.broadcast(
-      state.series_registry,
+    RunnerRegistry.broadcast(
+      state.registry,
       [:listener],
       event
     )

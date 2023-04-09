@@ -1,4 +1,4 @@
-defmodule Tringin.SeriesRunner.Events do
+defmodule Tringin.Runner.Events do
   @moduledoc false
 
   defmodule Initialized do
@@ -8,11 +8,12 @@ defmodule Tringin.SeriesRunner.Events do
   defmodule StateTransition do
     defstruct [
       :id,
-      :previous_state, 
-      :previous_state_tag, 
-      :new_state, 
+      :previous_state,
+      :previous_state_tag,
+      :new_state,
       :new_state_tag,
-      :expected_state_duration
+      :expected_state_duration,
+      :current_position
     ]
   end
 

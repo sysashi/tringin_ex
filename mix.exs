@@ -7,7 +7,8 @@ defmodule Tringin.MixProject do
       version: "0.1.0",
       elixir: "~> 1.10",
       start_permanent: Mix.env() == :prod,
-      deps: deps()
+      deps: deps(),
+      consolidate_protocols: Mix.env() != :test
     ]
   end
 
@@ -19,6 +20,8 @@ defmodule Tringin.MixProject do
   end
 
   defp deps do
-    []
+    [
+      {:nimble_options, "~> 1.0"}
+    ]
   end
 end

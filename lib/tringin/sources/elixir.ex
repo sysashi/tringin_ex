@@ -121,6 +121,7 @@ defmodule Tringin.Sources.Elixir do
       |> Enum.take_random(3)
       |> Enum.map(fn mod ->
         fun = hd(take_random_funs_with_docs.(mod, 1))
+
         format_fun(mod, fun)
       end)
 
@@ -148,7 +149,16 @@ defmodule Tringin.Sources.Elixir do
   defp topic(:fun_added_since, mod) do
     [fun] = take_random_funs(mod, 1, & &1.meta[:since])
 
-    %{major: major, minor: minor} = Version.parse!(fun.meta[:since])
+    since =
+      case String.split(fun.meta[:since], ".") do
+        [_major, _minor] ->
+          fun.meta[:since] <> ".0"
+
+        [_, _, _] ->
+          fun.meta[:since]
+      end
+
+    %{major: major, minor: minor} = Version.parse!(since)
 
     # 1.6.0 is where @since were introduced iirc
     incorrect_answers =

@@ -4,6 +4,8 @@ defmodule Tringin.Application do
   use Application
 
   def start(_type, _args) do
+    Logger.add_translator({GenStatemTranslator, :translate})
+
     Supervisor.start_link(
       [],
       name: Tringin.Supervisor,

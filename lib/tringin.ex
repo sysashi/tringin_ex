@@ -23,7 +23,7 @@ defmodule Tringin do
 
   def start_series(series_registry) do
     with {:ok, runner} <- SeriesRegistry.find_series_process(series_registry, :series_runner) do
-      Tringin.SeriesRunnerExpirement.start_series(runner)
+      Tringin.SeriesRunnerExpirement.start(runner)
     end
   end
 end
