@@ -21,7 +21,7 @@ defmodule Tringin.MixProject do
 
   defp deps do
     [
-      {:nimble_options, "~> 1.0"}
+      {:nimble_options, "~> 1.0", override: true}
     ]
   end
 end

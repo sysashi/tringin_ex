@@ -32,7 +32,7 @@ defmodule Tringin.RunnerSupervisor do
         {mod, opts}
       end
 
-    case Tringin.RunnerRegistry.register_runner_process(registry, :runner_supervisor) do
+    case Tringin.LocalRegistry.register_runner_process(registry, :runner_supervisor) do
       {:ok, _} ->
         Supervisor.init(children, strategy: :rest_for_one)
 

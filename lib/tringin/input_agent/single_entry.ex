@@ -7,8 +7,13 @@ defmodule Tringin.InputAgent.SingleEntry do
 
   require Logger
 
-  alias Tringin.RunnerRegistry
-  alias Tringin.Runner.Events.StateTransition
+  alias Tringin.LocalRegistry
+
+  alias Tringin.Runner.Events.{
+    ConfigChanged,
+    StateTransition
+  }
+
   alias Tringin.InputAgent.Events.SubmittedInputs
 
   def start_link(opts) do
@@ -23,15 +28,22 @@ defmodule Tringin.InputAgent.SingleEntry do
       state_tag: nil,
       inputs: %{},
       runner_state: nil,
+      runner_rest_duration: nil,
       registry: registry
     }
 
     with {:ok, _} <-
-           RunnerRegistry.register_runner_process(registry, {:service, :input_agent}),
-         {:ok, runner} <- RunnerRegistry.find_runner_process(registry, :runner),
-         {:ok, {%{state: runner_state}, state_tag}} <-
+           LocalRegistry.register_runner_process(registry, {:service, :input_agent}),
+         {:ok, runner} <- LocalRegistry.find_runner_process(registry, :runner),
+         {:ok, {%{state: runner_state, rest_duration: rest_dur}, state_tag}} <-
            Tringin.Runner.get_state(runner) do
-      {:ok, %{init_state | runner_state: runner_state, state_tag: state_tag}}
+      {:ok,
+       %{
+         init_state
+         | runner_state: runner_state,
+           state_tag: state_tag,
+           runner_rest_duration: rest_dur
+       }}
     else
       error ->
         {:stop, error, init_state}
@@ -46,8 +58,8 @@ defmodule Tringin.InputAgent.SingleEntry do
   end
 
   @impl true
-  def handle_call({:submit_input, responder_id, input}, {pid, _tag}, state) do
-    case register_input({responder_id, pid}, input, state) do
+  def handle_call({:submit_input, responder_id, input}, {_pid, _tag}, state) do
+    case register_input(responder_id, input, state) do
       {:ok, state} ->
         {:reply, :ok, state}
 
@@ -63,6 +75,10 @@ defmodule Tringin.InputAgent.SingleEntry do
 
   @impl true
   def handle_info(%StateTransition{new_state: :running} = event, state) do
+    if is_nil(state.runner_rest_duration) || state.runner_rest_duration <= 0 do
+      broadcast_inputs(state)
+    end
+
     state =
       state
       |> Map.put(:runner_state, :running)
@@ -73,17 +89,7 @@ defmodule Tringin.InputAgent.SingleEntry do
   end
 
   def handle_info(%StateTransition{new_state: :resting} = event, state) do
-    inputs_event = %SubmittedInputs{
-      id: {self(), make_ref()},
-      inputs: state.inputs,
-      state_tag: state.state_tag
-    }
-
-    RunnerRegistry.broadcast(
-      state.registry,
-      [:listener],
-      inputs_event
-    )
+    broadcast_inputs(state)
 
     state =
       state
@@ -100,6 +106,11 @@ defmodule Tringin.InputAgent.SingleEntry do
       |> Map.put(:runner_state, event.new_state)
       |> Map.put(:state_tag, event.new_state_tag)
 
+    {:noreply, state}
+  end
+
+  def handle_info(%ConfigChanged{} = event, state) do
+    state = Map.put(state, :runner_rest_duration, event.new_config.rest_duration)
     {:noreply, state}
   end
 
@@ -122,4 +133,18 @@ defmodule Tringin.InputAgent.SingleEntry do
   end
 
   def register_input(_, _, %{runner_state: runner_state}), do: {:error, runner_state}
+
+  defp broadcast_inputs(state) do
+    inputs_event = %SubmittedInputs{
+      id: {self(), make_ref()},
+      inputs: state.inputs,
+      state_tag: state.state_tag
+    }
+
+    LocalRegistry.broadcast(
+      state.registry,
+      [:listener],
+      inputs_event
+    )
+  end
 end

@@ -1,6 +1,6 @@
 # Tringin
 
-**TODO: Add description**
+**Dummy project for learning how to pusblish hex packages**
 
 ## Installation
 

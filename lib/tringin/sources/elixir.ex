@@ -7,8 +7,6 @@ defmodule Tringin.Sources.Elixir do
   # 3. func added_since
   # 4. mod doc
 
-  @behaviour Tringin.Source
-
   @modules_of_intereset [
     Kernel,
     Kernel.SpecialForms,
@@ -75,13 +73,7 @@ defmodule Tringin.Sources.Elixir do
         Enum.random(@modules_of_intereset)
       )
 
-    answers =
-      Tringin.Question.prepare_answers(
-        [question.answer | question.incorrect_answers],
-        question.answer
-      )
-
-    {:ok, Map.put(answers, :text, question.text)}
+    {:ok, question}
   end
 
   defp topic(:mod_doc, mod) do
@@ -112,7 +104,19 @@ defmodule Tringin.Sources.Elixir do
       take_random_funs(mod, n, &match?(%{"en" => _}, &1.doc))
     end
 
-    answer_fun = hd(take_random_funs_with_docs.(mod, 1))
+    try_n = fn fun, n ->
+      Enum.reduce_while(1..n, [], fn _i, _acc ->
+        result = fun.()
+
+        if Enum.empty?(result) do
+          {:cont, []}
+        else
+          {:halt, result}
+        end
+      end)
+    end
+
+    answer_fun = try_n.(fn -> take_random_funs_with_docs.(mod, 1) end, 10) |> hd()
     question_text = Helper.nth_sentence(answer_fun.doc["en"], 1)
 
     # FIXME answer can repeat
@@ -120,7 +124,7 @@ defmodule Tringin.Sources.Elixir do
       @modules_of_intereset
       |> Enum.take_random(3)
       |> Enum.map(fn mod ->
-        fun = hd(take_random_funs_with_docs.(mod, 1))
+        fun = try_n.(fn -> take_random_funs_with_docs.(mod, 1) end, 10) |> hd()
 
         format_fun(mod, fun)
       end)
@@ -175,7 +179,7 @@ defmodule Tringin.Sources.Elixir do
     }
   end
 
-  defp take_random_funs(mod, n, filter_fun \\ fn _ -> true end) do
+  defp take_random_funs(mod, n, filter_fun) do
     {_mod_doc, docs} = @formatted_modules_docs[mod]
 
     docs

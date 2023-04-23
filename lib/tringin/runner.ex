@@ -64,7 +64,7 @@ defmodule Tringin.Runner do
 
   @behaviour :gen_statem
 
-  @registry Application.compile_env(:tringin_ex, :registry, Tringin.RunnerRegistry)
+  @registry Application.compile_env(:tringin_ex, :registry, Tringin.LocalRegistry)
 
   require Logger
 
@@ -102,13 +102,13 @@ defmodule Tringin.Runner do
     :gen_statem.call(runner, :start)
   end
 
-  def stop(runner) do
-    :gen_statem.call(runner, :stop)
+  def stop(runner, reason) when is_atom(reason) do
+    :gen_statem.call(runner, {:stop, reason})
   end
 
   # FIXME
   def restart(runner) do
-    :gen_statem.cast(runner, :reset_position)
+    :gen_statem.cast(runner, :restart)
   end
 
   def pause(runner) do
@@ -129,6 +129,10 @@ defmodule Tringin.Runner do
 
   ## Util
 
+  def configure(runner, config) do
+    :gen_statem.call(runner, {:configure, config})
+  end
+
   def get_state(runner_pid) do
     :gen_statem.call(runner_pid, :get_state)
   end
@@ -140,7 +144,6 @@ defmodule Tringin.Runner do
 
   @impl true
   def init(opts) do
-    IO.inspect(opts)
     {registry, opts} = Keyword.pop!(opts, :registry)
     config = Config.new!(opts) |> Map.new()
 
@@ -151,6 +154,8 @@ defmodule Tringin.Runner do
           |> Map.put(:registry, registry)
           |> Map.put(:position, config.starting_position)
           |> put_private(:state_tag, gen_state_tag())
+
+        broadcast_init(runner)
 
         {:ok, :waiting, runner}
 
@@ -183,52 +188,20 @@ defmodule Tringin.Runner do
     {:keep_state_and_data, {:reply, from, {:ok, build_state_snapshot(runner)}}}
   end
 
-  # FIXME currently setting this to 0 so the next time it runs its gonna be 1
-  def handle_event(:cast, :reset_position, _, runner) do
-    {:keep_state, set_position(runner, 1)}
-  end
+  def handle_event({:call, from}, {:configure, config}, _state, runner) do
+    case update_config(runner, config) do
+      {:ok, updated_runner} ->
+        old_config = extract_config(runner)
+        broadcast_config_change(updated_runner, old_config)
 
-  ## Pause
+        {:keep_state, updated_runner, {:reply, from, :ok}}
 
-  def handle_event(:cast, :pause, {state, tref}, runner)
-      when state in [:starting, :running, :resting] do
-    case :erlang.cancel_timer(tref) do
-      remaining_ms when is_integer(remaining_ms) ->
-        {:next_state, {:paused, {state, remaining_ms}}, runner}
-
-      other ->
-        raise "Could not cancel timer at state: #{state}, got: #{other}"
-        {:next_state, {:paused, state}, runner}
+      {:error, reason} ->
+        {:keep_state, runner, {:reply, from, {:error, reason}}}
     end
   end
 
-  def handle_event(:cast, :pause, _state, _runner) do
-    :keep_state_and_data
-  end
-
-  ## Continue
-
-  def handle_event(_event_type, :continue, {:paused, {state, remaining_ms}}, runner) do
-    next_event =
-      if runner.post_pause_delay && runner.post_pause_delay >= 0 do
-        {:unpausing, {start_timer(runner, :unpausing), {state, remaining_ms}}}
-      else
-        {state, start_timer(remaining_ms, state)}
-      end
-
-    {:next_state, next_event, runner}
-  end
-
-  def handle_event(:info, {:timeout, tref, _}, {:unpausing, {tref, paused}}, runner) do
-    {state, remaining_ms} = paused
-    {:next_state, {state, start_timer(remaining_ms, state)}, runner}
-  end
-
-  def handle_event(_event_type, :continue, _state, _runner) do
-    :keep_state_and_data
-  end
-
-  # Starting Runner
+  ## Starting Runner
 
   def handle_event({:call, from}, :start, :waiting, %{run_mode: :automatic} = runner) do
     next_event =
@@ -255,13 +228,111 @@ defmodule Tringin.Runner do
     }
   end
 
+  def handle_event(:info, {:timeout, tref, _}, {:starting, tref}, runner) do
+    {
+      :next_state,
+      {:running, start_timer(runner, :running)},
+      runner
+    }
+  end
+
   def handle_event({:call, from}, :start, {:paused, _}, _runner) do
     {:keep_state_and_data, [{:reply, from, :ok}, {:next_event, :internal, :continue}]}
+  end
+
+  def handle_event({:call, from}, :start, {:stopped, reason}, _runner) do
+    {:keep_state_and_data, {:reply, from, {:error, {:stopped, reason}}}}
   end
 
   def handle_event({:call, from}, :start, _, _runner) do
     {:keep_state_and_data, {:reply, from, {:error, :already_running}}}
   end
+
+  ## Stopping
+
+  def handle_event({:call, from}, {:stop, reason}, state, runner) do
+    # handle states with timeouts
+    case state do
+      {:unpausing, {tref, _}} ->
+        :erlang.cancel_timer(tref)
+
+      {_state, tref} when is_reference(tref) ->
+        :erlang.cancel_timer(tref)
+
+      _ ->
+        :ok
+    end
+
+    {:next_state, {:stopped, reason}, runner, {:reply, from, :ok}}
+  end
+
+  ## Restart
+
+  def handle_event(:cast, :restart, {:paused, _paused_state}, _runner) do
+    :keep_state_and_data
+  end
+
+  def handle_event(:cast, :restart, {:unpausing, {_tref, _paused_state}}, _runner) do
+    :keep_state_and_data
+  end
+
+  def handle_event(:cast, :restart, state, runner) do
+    Logger.debug("Restarting #{inspect(state)}")
+
+    case state do
+      {_state, tref} when is_reference(tref) ->
+        :erlang.cancel_timer(tref)
+
+      _ ->
+        :ok
+    end
+
+    {:next_state, :waiting, set_position(runner, 1)}
+  end
+
+  ## Pause
+
+  def handle_event(:cast, :pause, {state, tref}, runner)
+      when state in [:starting, :running, :resting] do
+    case :erlang.cancel_timer(tref) do
+      remaining_ms when is_integer(remaining_ms) ->
+        {:next_state, {:paused, {state, remaining_ms}}, runner}
+
+      other ->
+        raise "Could not cancel timer at state: #{state}, got: #{other}"
+        {:next_state, {:paused, state}, runner}
+    end
+  end
+
+  def handle_event(:cast, :pause, _state, _runner) do
+    :keep_state_and_data
+  end
+
+  ## Continue/Unpause
+
+  # unpausing state is more complex than the others
+  # {:unpausing, unpausing_tref, paused_state}
+  def handle_event(_event_type, :continue, {:paused, {state, remaining_ms}}, runner) do
+    next_event =
+      if runner.post_pause_delay && runner.post_pause_delay >= 0 do
+        {:unpausing, {start_timer(runner, :unpausing), {state, remaining_ms}}}
+      else
+        {state, start_timer(remaining_ms, state)}
+      end
+
+    {:next_state, next_event, runner}
+  end
+
+  def handle_event(:info, {:timeout, tref, _}, {:unpausing, {tref, paused}}, runner) do
+    {state, remaining_ms} = paused
+    {:next_state, {state, start_timer(remaining_ms, state)}, runner}
+  end
+
+  def handle_event(_event_type, :continue, _state, _runner) do
+    :keep_state_and_data
+  end
+
+  ## Manual run
 
   def handle_event({:call, from}, :next, {:running, :manual, _}, runner) do
     runner = set_next_position(runner)
@@ -278,20 +349,14 @@ defmodule Tringin.Runner do
     {:keep_state_and_data, {:reply, from, {:error, :invalid_state}}}
   end
 
-  def handle_event(:info, {:timeout, tref, _}, {:starting, tref}, runner) do
-    {
-      :next_state,
-      {:running, start_timer(runner, :running)},
-      runner
-    }
-  end
+  ## Automatic run
 
   def handle_event(:info, {:timeout, tref, _}, {:running, tref}, runner) do
-    next_event =
+    {next_event, runner} =
       if runner.rest_duration && runner.rest_duration >= 0 do
-        {:resting, start_timer(runner, :resting)}
+        {{:resting, start_timer(runner, :resting)}, runner}
       else
-        {:running, start_timer(runner, :running)}
+        {{:running, start_timer(runner, :running)}, set_next_position(runner)}
       end
 
     {
@@ -309,6 +374,24 @@ defmodule Tringin.Runner do
     }
   end
 
+  ## Lost timeouts
+
+  # Runner was restarted, some timers could still be running and finishing
+  # should we keep track of all timers and cancel them on restart?
+  # def handle_event(:info, {:timeout, _tref, _}, :waiting, _runner) do
+  #   :keep_state_and_data
+  # end
+
+  def handle_event(:info, {:timeout, _tref, timedout_state}, state, _runner) do
+    Logger.error(
+      "Wild timeout appears at state: #{inspect(state)}, timedout_state: #{inspect(timedout_state)}"
+    )
+
+    :keep_state_and_data
+  end
+
+  # integer duration is used for starting "remaining" duration
+  # of a state from pause
   defp start_timer(duration, next_state) when is_integer(duration) do
     :erlang.start_timer(
       duration,
@@ -331,6 +414,12 @@ defmodule Tringin.Runner do
   def timer_dur(%{post_pause_delay: dur}, :unpausing), do: dur
 
   ## Util
+
+  def update_config(runner, config) do
+    with {:ok, config} <- Config.new(config) do
+      {:ok, struct(runner, config)}
+    end
+  end
 
   def gen_state_tag(),
     do: {
@@ -361,10 +450,58 @@ defmodule Tringin.Runner do
 
   def broadcast_init(runner) do
     event = %Initialized{
-      config: %{}
+      config:
+        Map.take(runner, [
+          :run_mode,
+          :start_delay,
+          :run_duration,
+          :rest_duration,
+          :post_pause_delay,
+          :state,
+          :position,
+          :direction
+        ])
     }
+
+    @registry.broadcast(
+      runner.registry,
+      [:service, :listener],
+      event
+    )
+
+    runner
   end
 
+  def broadcast_config_change(runner, old_config) do
+    event = %ConfigChanged{
+      id: {self(), make_ref()},
+      old_config: old_config,
+      new_config: extract_config(runner)
+    }
+
+    @registry.broadcast(
+      runner.registry,
+      [:service, :listener],
+      event
+    )
+
+    runner
+  end
+
+  defp extract_config(runner) do
+    runner
+    |> Map.take([
+      :run_mode,
+      :start_delay,
+      :run_duration,
+      :rest_duration,
+      :post_pause_delay,
+      :direction
+    ])
+    |> Map.put_new(:starting_position, 1)
+  end
+
+  defp simple_state({:stopped, reason}), do: {:stopped, reason}
   defp simple_state({state, _tref_or_remaining_ms}), do: state
   defp simple_state({state, _mode, _current_position}), do: state
   defp simple_state(state) when is_atom(state), do: state
@@ -391,14 +528,11 @@ defmodule Tringin.Runner do
     %{runner | position: pos - 1}
   end
 
-  defp put_private(%{private: private} = runner, key, value) do
-    %{runner | private: Map.put(private, key, value)}
-  end
-
   defp state_to_duration(%{state: {paused_state, _tref}}, {:paused, {paused_state, remaining_ms}}) do
     remaining_ms
   end
 
+  # TODO decipher state_to_duration
   defp state_to_duration(
          %{state: {paused_state, _tref}},
          {:unpausing, {_, {paused_state, remaining_ms}}}
@@ -422,5 +556,9 @@ defmodule Tringin.Runner do
   defp state_to_duration(%{state: state}, _) do
     Logger.warn("Tringin.Runner unknown duration for #{inspect(state)} state")
     nil
+  end
+
+  defp put_private(%{private: private} = runner, key, value) do
+    %{runner | private: Map.put(private, key, value)}
   end
 end

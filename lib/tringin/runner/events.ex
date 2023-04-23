@@ -18,6 +18,6 @@ defmodule Tringin.Runner.Events do
   end
 
   defmodule ConfigChanged do
-    defstruct [:previous_config, :new_config]
+    defstruct [:id, :old_config, :new_config]
   end
 end

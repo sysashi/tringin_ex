@@ -1,7 +1,7 @@
 defmodule Tringin.ProgressBroadcaster do
   use GenServer
 
-  alias Tringin.RunnerRegistry
+  alias Tringin.LocalRegistry
   alias Tringin.Runner.Events.StateTransition
   alias Tringin.ProgressBroadcaster.Events.ProgressUpdate
 
@@ -22,8 +22,8 @@ defmodule Tringin.ProgressBroadcaster do
     }
 
     with {:ok, _} <-
-           RunnerRegistry.register_runner_process(registry, {:service, :progress_broadcaster}),
-         {:ok, runner} <- RunnerRegistry.find_runner_process(registry, :runner),
+           LocalRegistry.register_runner_process(registry, {:service, :progress_broadcaster}),
+         {:ok, runner} <- LocalRegistry.find_runner_process(registry, :runner),
          {:ok, {runner, state_tag}} <- Tringin.Runner.get_state(runner) do
       state =
         state
@@ -61,7 +61,7 @@ defmodule Tringin.ProgressBroadcaster do
       latest_state_tag: state.latest_state_tag
     }
 
-    RunnerRegistry.broadcast(
+    LocalRegistry.broadcast(
       state.registry,
       [:listener],
       event

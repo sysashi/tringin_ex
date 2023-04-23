@@ -43,6 +43,11 @@ defmodule Tringin.Runner.Config do
                   )
 
   @doc "Supported options:\n#{NimbleOptions.docs(@options_schema)}"
+  def new(opts) do
+    NimbleOptions.validate(opts, @options_schema)
+  end
+
+  @doc "Same as `new/1` but raises in case of validation errors"
   def new!(opts) do
     NimbleOptions.validate!(opts, @options_schema)
   end
